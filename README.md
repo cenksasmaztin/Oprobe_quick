@@ -1,234 +1,205 @@
-# Oprobe Combined Test Runner
-
-This repository contains `run_all_tests.py`, a **single-entry** test orchestrator that launches multiple network health checks (DNS, HTTPS, NTP, jitter, bufferbloat-like, meeting test, and Wi‑Fi check) and collects **all outputs into one TXT report** with clear sections per test.
-
-> **Key behavior:** If the agent’s primary connection is **Ethernet (BaseT)**, the Wi‑Fi test (`wificheck.py`) is **automatically skipped** and the combined report includes:
->
-> ```
-> ### wificheck.py ###
-> Started: 2025-09-15T14:xx:xx
-> STATUS: SKIPPED
-> REASON: This agent connection BaseT
-> ======================================================================
-> ```
+# 📘 README – Oprobe Test Runner
 
 ---
 
-## Contents
+## 🇹🇷 Türkçe
 
-- [Features](#features)
-- [Test Suite](#test-suite)
-- [How It Works](#how-it-works)
-- [Output](#output)
-- [Supported Linux Versions](#supported-linux-versions)
-- [Prerequisites](#prerequisites)
-  - [System packages (Linux)](#system-packages-linux)
-  - [Python libraries](#python-libraries)
-- [Installation](#installation)
-  - [Virtualenv (recommended)](#virtualenv-recommended)
-- [Usage](#usage)
-- [Configuration](#configuration)
-- [Troubleshooting](#troubleshooting)
-- [Extending / Adding New Tests](#extending--adding-new-tests)
-- [FAQ](#faq)
+### 📌 Genel Bakış
+`run_all_tests.py`, ağ performansı ve bağlantı kalitesini ölçmek için hazırlanmış test scriptlerini **periyodik aralıklarla** çalıştırır.  
+Program başlatıldığında hemen bir test turu yapar, ardından **CTRL+C ile durdurulana kadar her 10 dakikada bir** testleri tekrarlar.  
+
+Her turda sonuçlar `results/` klasöründe zaman damgalı (`YYYYMMDD_HHMMSS_all_tests.txt`) bir dosyaya kaydedilir.
 
 ---
 
-## Features
-
-- Runs a curated set of network tests for **N** seconds each (default: `30`).
-- Collects **stdout** and **stderr** for each test into a **single TXT file**.
-- **Gracefully terminates** each test after the allotted duration (process group handling).
-- Cleans up temporary directories left by some tests.
-- **Smart Wi‑Fi logic:** detects primary egress interface; if it’s not wireless, Wi‑Fi test is skipped and the report notes **“This agent connection BaseT”**.
-
----
-
-## Test Suite
-
-The default `TESTS` list in `run_all_tests.py` is:
-
-- `dns_resol_latency.py` — DNS resolve latency, avg latency in ms.
-- `https_latency.py` — HTTPS request latency, avg latency in ms.
-- `ntp_test.py` — NTP round-trip delay (requires `ntplib`), ms.
-- `jitter_test.py` — Basic jitter summary (avg in ms).
-- `bufferbloat_like_test.py` — Baseline vs load latency using parallel transfers.
-- `meeting_test.py` — Meeting/RTC-like latency sampler (avg in ms).
-- `wificheck.py` — Real-time Wi‑Fi snapshot: SSID/BSSID, channel/band, RSSI, SNR, basic GW/Internet ping, DHCP/DNS/Auth statuses. **Skipped on BaseT.**
-
-> Not all scripts need to exist for the runner to work; missing tests will be reported in the combined output with a clear error block.
+### 🔍 Çalışan Testler
+- **dns_resol_latency.py** – DNS çözümleme gecikmesi  
+- **https_latency.py** – HTTPS bağlantı gecikmesi  
+- **ntp_test.py** – NTP senkronizasyon gecikmesi  
+- **jitter_test.py** – Jitter (gecikme dalgalanması)  
+- **bufferbloat_like_test.py** – Bufferbloat etkisi  
+- **meeting_test.py** – Online toplantı simülasyonu  
+- **wificheck.py** – Kablosuz bağlantı kalitesi  
+  > ⚠️ Kablolu (BaseT) bağlantıda `wificheck.py` otomatik atlanır.
 
 ---
 
-## How It Works
+### 📂 Çıktılar
+- Tüm raporlar `results/` klasörüne yazılır.  
+- Her tur için **yeni dosya** oluşturulur:  
 
-1. `run_all_tests.py` computes a batch timestamp and prepares `results/`.
-2. For each test:
-   - Builds a `python3 -u <script.py>` command
-   - Runs it for `RUN_DURATION` seconds
-   - Gracefully terminates the process group
-   - Appends a formatted block with **stdout** / **stderr** to the report
-3. **Wi‑Fi detection**: the runner calls `ip route get 8.8.8.8` to detect the **primary egress interface**. If that interface is not recognized as wireless (no `/sys/class/net/<iface>/wireless` and not listed by `iw dev`), Wi‑Fi is considered **inactive** and `wificheck.py` is skipped.
-
----
-
-## Output
-
-- One consolidated TXT file per run:
-  - `results/YYYYMMDD_HHMMSS_all_tests.txt`
-- Structure:
-  ```
-  # Oprobe Combined Test Results
-  Generated at 2025-09-15T14:27:31
-  ======================================================================
-
-  ### dns_resol_latency.py ###
-  Started: ... | Ended: ...
-  PID: ... | Duration: 30s | Return code: 0
-  --- STDOUT ---
-  ...
-  --- STDERR ---
-  ...
-  ======================================================================
-
-  ### wificheck.py ###
-  Started: ... 
-  STATUS: SKIPPED
-  REASON: This agent connection BaseT
-  ======================================================================
-  ```
-
----
-
-## Supported Linux Versions
-
-The runner targets modern Linux systems with `iproute2` and `iw`. Verified families:
-
-- **Ubuntu**: 20.04 LTS, 22.04 LTS, 24.04 LTS
-- **Debian**: 11 (Bullseye), 12 (Bookworm)
-- **Raspberry Pi OS**: Bullseye / Bookworm (ARM; headless or desktop)
-- **Fedora**: 38, 39, 40
-- **Rocky / AlmaLinux**: 8, 9
-
-> It should work on most Linux distros if `ip`, `iw`, and `python3` are available. macOS/Windows are not primary targets for the Wi‑Fi detection logic, but most tests can still run individually.
-
----
-
-## Prerequisites
-
-### System packages (Linux)
-
-Install with your distro’s package manager:
-
-**Debian/Ubuntu/Raspberry Pi OS:**
-```bash
-sudo apt update
-sudo apt install -y python3 python3-venv python3-pip iproute2 iw iputils-ping curl
 ```
-
-**Fedora:**
-```bash
-sudo dnf install -y python3 python3-pip iproute iputils iw curl
-```
-
-**Rocky/AlmaLinux/CentOS (8/9):**
-```bash
-sudo dnf install -y python3 python3-pip iproute iputils iw curl
-```
-
-> `iputils-ping` might require root to send raw ICMP. Either run tests with `sudo`, or grant `cap_net_raw+ep` to the ping binary if needed.
-
-### Python libraries
-
-Create a virtualenv and install these libraries (superset to cover all included tests):
-
-- `ntplib` — for NTP round-trip delay in `ntp_test.py`
-- `requests` — common HTTP client (some tests may use it)
-- `httpx` — async HTTP client (useful for bufferbloat-like test)
-- `matplotlib` — used by `wificheck.py` (if graphing is enabled)
-- `reportlab` — used by `wificheck.py` (if PDF output is enabled)
-
-> If your test scripts import additional packages, include them similarly.
-
-Quick install:
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install ntplib requests httpx matplotlib reportlab
+results/
+ ├── 20250917_220500_all_tests.txt
+ ├── 20250917_221500_all_tests.txt
+ └── ...
 ```
 
 ---
 
-## Installation
-
-Place all test scripts and `run_all_tests.py` in the **same directory**. Ensure executable permission (optional):
-```bash
-chmod +x run_all_tests.py
-```
-
-### Virtualenv (recommended)
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install ntplib requests httpx matplotlib reportlab
-```
+### ⚙️ Kurulum
+1. Python 3.8+  
+2. Gerekli kütüphaneler:
+   ```bash
+   pip install ntplib
+   ```
+3. Sistem araçları:
+   - `ip`
+   - `iw`
 
 ---
 
-## Usage
-
-From the project directory:
+### ▶️ Kullanım
 ```bash
 python3 run_all_tests.py
 ```
-- Output will be written to `results/YYYYMMDD_HHMMSS_all_tests.txt`
 
-> **Wi‑Fi skip:** On BaseT, `wificheck.py` will be skipped automatically and the report will include “This agent connection BaseT”.
-
----
-
-## Configuration
-
-Open `run_all_tests.py` and adjust:
-
-- `RUN_DURATION` — per-test runtime in seconds (default: `30`)
-- `TESTS` — list of test script filenames
-- `RESULTS_DIR` — output directory (default: `./results`)
+- Başlatıldığında ilk tur hemen yapılır.  
+- Ardından **10 dakikada bir** tekrarlanır.  
+- Durdurmak için `CTRL+C`.  
 
 ---
 
-## Troubleshooting
-
-- **SyntaxError in runner**: Ensure you are on the updated `run_all_tests.py` (docstrings use standard triple quotes).
-- **`iw: command not found`**: Install `iw` package (see prerequisites).
-- **Wi‑Fi is active but still skipped**:
-  - Verify the primary interface: `ip route get 8.8.8.8`
-  - Check whether it appears in `iw dev` output.
-  - Some drivers expose wireless under a different interface; you can adapt `_is_wireless_iface` logic if needed.
-- **Ping requires root**: Either run `sudo python3 run_all_tests.py` or adjust capabilities for `ping`.
-- **Missing Python modules**: Activate your venv and `pip install` the modules listed above.
-- **No output (STDOUT)** for a test: That test may buffer output or only print at the end; the runner still captures whatever is printed within the run window.
+### 🔧 Ayarlar
+- **RUN_DURATION** → her testin çalışma süresi (sn)  
+- **INTERVAL_SECONDS** → testler arası bekleme süresi (sn)  
 
 ---
 
-## Extending / Adding New Tests
+### 📑 Örnek Çıktılar
+**dns_resol_latency.py**
+```
+### dns_resol_latency.py ###
+Started: 2025-09-17T22:05:01  |  Ended: 2025-09-17T22:05:31
+PID: 1234  |  Duration: 30s  |  Return code: 0
+--- STDOUT ---
+google.com latency: 1.2 ms
+cloudflare.com latency: 0.8 ms
+Average latency: 1.0 ms
+--- STDERR ---
+(No errors)
+======================================================================
+```
 
-1. Drop your script (e.g., `my_new_test.py`) next to `run_all_tests.py`.
-2. Add its filename to `TESTS` in `run_all_tests.py`.
-3. (Optional) Extend `parse_metrics_from_text()` if you want to build a custom summary later.
-4. Ensure your script prints useful runtime output to stdout/stderr.
+**https_latency.py**
+```
+### https_latency.py ###
+Started: 2025-09-17T22:06:01  |  Ended: 2025-09-17T22:06:31
+PID: 1250  |  Duration: 30s  |  Return code: 0
+--- STDOUT ---
+HTTPS Latency (avg): 45.7 ms
+--- STDERR ---
+(No errors)
+======================================================================
+```
+
+**wificheck.py (kablolu bağlantıda)**  
+```
+### wificheck.py ###
+Started: 2025-09-17T22:08:01
+STATUS: SKIPPED
+REASON: This agent connection BaseT
+======================================================================
+```
 
 ---
 
-## FAQ
+## 🇬🇧 English
 
-**Q: Tek dosyalık rapor şart mı?**  
-Evet, bu koşumlayıcı tek bir TXT dosyasına tüm çıktıları yazar. Gerektiğinde farklı formatlara (JSON/CSV/PDF) dönüştürülebilir.
+### 📌 Overview
+`run_all_tests.py` executes multiple network performance test scripts at **periodic intervals**.  
+When started, it immediately runs one test round, then **repeats every 10 minutes until stopped with CTRL+C**.  
 
-**Q: Windows veya macOS’ta çalışır mı?**  
-Çoğu test Python olduğundan çalışır, fakat **Wi‑Fi tespiti** Linux odaklıdır. Ethernet/BaseT tespiti Windows/macOS’ta farklı yöntemler gerektirir.
+Each round generates a new timestamped file (`YYYYMMDD_HHMMSS_all_tests.txt`) inside the `results/` directory.
 
-**Q: Wi‑Fi testini zorla çalıştırabilir miyim?**  
-Evet, `is_wifi_active()` kontrolünü atlayacak bir bayrak ekleyebilir veya doğrudan `wificheck.py`’yi `TESTS` listesinden geçici çıkarabilirsiniz.
+---
+
+### 🔍 Included Tests
+- **dns_resol_latency.py** – DNS resolution latency  
+- **https_latency.py** – HTTPS connection latency  
+- **ntp_test.py** – NTP synchronization delay  
+- **jitter_test.py** – Jitter measurement  
+- **bufferbloat_like_test.py** – Bufferbloat effect  
+- **meeting_test.py** – Online meeting simulation  
+- **wificheck.py** – Wireless connection quality  
+  > ⚠️ Skipped automatically if the device is on wired (BaseT).
+
+---
+
+### 📂 Output
+- All reports are stored in `results/`.  
+- Each test round creates a **new file**:  
+
+```
+results/
+ ├── 20250917_220500_all_tests.txt
+ ├── 20250917_221500_all_tests.txt
+ └── ...
+```
+
+---
+
+### ⚙️ Installation
+1. Python 3.8+  
+2. Required libraries:
+   ```bash
+   pip install ntplib
+   ```
+3. System tools:
+   - `ip`
+   - `iw`
+
+---
+
+### ▶️ Usage
+```bash
+python3 run_all_tests.py
+```
+
+- Runs immediately once.  
+- Repeats every **10 minutes**.  
+- Stop with `CTRL+C`.  
+
+---
+
+### 🔧 Configuration
+- **RUN_DURATION** → how long each test runs (seconds)  
+- **INTERVAL_SECONDS** → interval between test rounds (seconds)  
+
+---
+
+### 📑 Sample Output
+**dns_resol_latency.py**
+```
+### dns_resol_latency.py ###
+Started: 2025-09-17T22:05:01  |  Ended: 2025-09-17T22:05:31
+PID: 1234  |  Duration: 30s  |  Return code: 0
+--- STDOUT ---
+google.com latency: 1.2 ms
+cloudflare.com latency: 0.8 ms
+Average latency: 1.0 ms
+--- STDERR ---
+(No errors)
+======================================================================
+```
+
+**https_latency.py**
+```
+### https_latency.py ###
+Started: 2025-09-17T22:06:01  |  Ended: 2025-09-17T22:06:31
+PID: 1250  |  Duration: 30s  |  Return code: 0
+--- STDOUT ---
+HTTPS Latency (avg): 45.7 ms
+--- STDERR ---
+(No errors)
+======================================================================
+```
+
+**wificheck.py (wired connection)**  
+```
+### wificheck.py ###
+Started: 2025-09-17T22:08:01
+STATUS: SKIPPED
+REASON: This agent connection BaseT
+======================================================================
+```
