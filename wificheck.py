@@ -1,423 +1,344 @@
-import subprocess
-import re
-import time
-import socket
-import os
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os, re, sys, time, shutil, socket, platform, subprocess
 from datetime import datetime
-import statistics
-import matplotlib.pyplot as plt
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
+from typing import Dict, Optional, List
 
-# Color codes
-RED = "\033[91m"
-GREEN = "\033[92m"
-ORANGE = "\033[93m"
-RESET = "\033[0m"
+REFRESH_SEC = 3
+INTERNAL_PING_HOST = "1.1.1.1"
+PING_TIMEOUT_SEC = 1.5
 
-# Data storage lists
-timestamps = []
-signal_strengths = []
-snr_values = []
-gtw_ping_times = []
-int_ping_times = []
-data_rates = []
-throughputs = []
-dhcp_results = []
-dns_results = []
-auth_results = []
-wifi_performance_results = []
+HEADERS = [
+    "Timestamp","MAC Address","SSID","AP","Frequency","Channel","Signal Strength",
+    "Data Rate","Throughput","SNR","GTW Ping","INT Ping","DHCP","DNS","Auth","WIFI Performance"
+]
 
-# Function to get the channel number based on frequency
-def get_channel_from_frequency(freq):
-    freq = int(freq)
-    if 2400 <= freq <= 2500:
-        return (freq - 2407) // 5
-    elif 5000 <= freq <= 6000:
-        return (freq - 5000) // 5
-    return "N/A"
+IS_MAC = platform.system() == "Darwin"
+IS_LINUX = platform.system() == "Linux"
 
-# Ping function and returning ping time
-def ping(host):
+def run(cmd: List[str], timeout: float = 2.5) -> str:
     try:
-        output = subprocess.check_output(["ping", "-I", "wlan0", "-c", "1", host], stderr=subprocess.STDOUT).decode('utf-8')
-        match = re.search(r'time=(\d+\.\d+)', output)
-        if match:
-            return True, float(match.group(1))  # If ping is successful, return the time
-        else:
-            return False, None
-    except subprocess.CalledProcessError:
-        return False, None
+        out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             timeout=timeout, check=False, text=True)
+        return out.stdout.strip()
+    except Exception:
+        return ""
 
-# Gateway check (Ping the default gateway)
-def gateway_check():
+def which(x: str) -> Optional[str]:
+    return shutil.which(x)
+
+def ts() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def hz_from_channel(ch: int) -> str:
+    if ch <= 0: return "-"
+    if 1 <= ch <= 14: return "2.4 GHz"
+    if 36 <= ch <= 165: return "5 GHz"
+    if 1 <= ch <= 233 and ch not in range(1,15) and not (36 <= ch <= 165): return "6 GHz"
+    return "-"
+
+def parse_ping_ms(output: str) -> Optional[float]:
+    m = re.search(r"time[=<]\s*([\d\.]+)\s*ms", output)
+    return float(m.group(1)) if m else None
+
+def do_ping(host: Optional[str]) -> Optional[float]:
+    if not host: return None
+    if IS_MAC:
+        out = run(["ping","-c","1","-n",host], timeout=PING_TIMEOUT_SEC)
+    else:
+        out = run(["ping","-c","1","-n","-w",str(int(PING_TIMEOUT_SEC)),host], timeout=PING_TIMEOUT_SEC+0.5)
+    return parse_ping_ms(out)
+
+def get_default_gateway() -> Optional[str]:
+    if IS_MAC:
+        out = run(["route","-n","get","default"], timeout=1.5)
+        m = re.search(r"gateway:\s+([0-9\.]+)", out)
+        return m.group(1) if m else None
+    elif IS_LINUX:
+        out = run(["ip","route","show","default"], timeout=1.5)
+        m = re.search(r"default via ([0-9\.]+)", out)
+        return m.group(1) if m else None
+    return None
+
+def resolv_conf_dns() -> List[str]:
     try:
-        output = subprocess.check_output(["ip", "route"]).decode('utf-8')
-        gateway = re.search(r'default via ([\d.]+)', output)
-        if gateway:
-            return ping(gateway.group(1))  # Ping function returns true/false and time
-        else:
-            return False, None
-    except subprocess.CalledProcessError:
-        return False, None
-
-# Internet ping check (Ping 8.8.8.8)
-def internet_check():
-    return ping("8.8.8.8")
-
-# DHCP test function
-def dhcp_check():
-    try:
-        output = subprocess.check_output(["ip", "addr", "show", "wlan0"]).decode('utf-8')
-        if "inet " in output:
-            return True  # DHCP successfully assigned IP
-        else:
-            return False
-    except subprocess.CalledProcessError:
-        return False
-
-# DNS test function
-def dns_check():
-    try:
-        socket.gethostbyname('google.com')
-        return True  # DNS resolved successfully
-    except socket.gaierror:
-        return False
-
-# Authentication test function to get the current Wi-Fi authentication method using wpa_cli
-def auth_check(interface='wlan0'):
-    try:
-        # Run the 'wpa_cli status' command to get Wi-Fi status details
-        cmd = ["wpa_cli", "-i", interface, "status"]
-        output = subprocess.check_output(cmd).decode('utf-8')
-
-        # Check for encryption/authentication type using the 'key_mgmt' field
-        if "WPA3" in output:
-            return "WPA3"
-        elif "WPA2" in output:
-            return "WPA2"
-        elif "WPA" in output:
-            return "WPA"
-        else:
-            return "None"  # If no match is found, assume open network (None)
-    except subprocess.CalledProcessError:
-        return "Unknown"  # If the command fails or we can't retrieve the data
-
-# Function to collect Wi-Fi device information
-def get_wifi_info(interface='wlan0'):
-    cmd = ["iw", "dev", interface, "station", "dump"]
-    try:
-        output = subprocess.check_output(cmd).decode('utf-8')
-    except subprocess.CalledProcessError as e:
-        print(f"Error occurred: {e}")
+        with open("/etc/resolv.conf") as f:
+            return re.findall(r"^nameserver\s+([0-9a-fA-F:\.]+)", f.read(), re.M)
+    except Exception:
         return []
 
-    devices_info = []
-    device_info = {}
+# -------------------- macOS helpers --------------------
+def mac_airport_path() -> Optional[str]:
+    p = which("airport")
+    if p: return p
+    cand = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
+    return cand if os.path.exists(cand) else None
 
-    # Adding timestamp
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+def mac_iface_from_route() -> Optional[str]:
+    out = run(["route","-n","get","default"], timeout=1.5)
+    m = re.search(r"interface:\s*(\S+)", out)
+    return m.group(1) if m else None
 
-    for line in output.split('\n'):
-        if "Station" in line:
-            if device_info:
-                devices_info.append(device_info)
-                device_info = {}
-            device_info['MAC Address'] = line.split()[1]
-        elif "signal:" in line:
-            signal_strength = int(re.search(r"-?\d+", line).group(0))
-            device_info['Signal Strength'] = signal_strength
-        elif "tx bitrate:" in line:
-            device_info['Data Rate'] = line.split(':')[1].strip()
-        elif "rx bytes:" in line:
-            throughput_bytes = int(line.split(':')[1].strip())  # Total bytes received
-            throughput_mbps = (throughput_bytes * 8) / 1_000_000  # Convert from bytes to Mbps
-            device_info['Throughput'] = throughput_mbps
+def mac_wifi_device() -> Optional[str]:
+    # Primary: map "Hardware Port: Wi-Fi" -> Device
+    out = run(["networksetup","-listallhardwareports"], timeout=2.5)
+    blocks = re.split(r"\n\s*\n", out)
+    for b in blocks:
+        if "Wi-Fi" in b or "AirPort" in b:
+            m = re.search(r"Device:\s*(\S+)", b)
+            if m: return m.group(1)
+    # Fallback to default-route iface if it looks like enX
+    riface = mac_iface_from_route()
+    if riface and riface.startswith("en"): return riface
+    # Last resort guesses
+    for g in ("en0","en1","en2"):
+        if run(["ifconfig", g]): return g
+    return None
 
-    # Default noise level
-    noise_level = -90  # dBm (This is a default value, real value can be added if found)
+def mac_wifi_info() -> Dict[str,str]:
+    info: Dict[str,str] = {}
+    iface = mac_wifi_device()
+    if not iface:
+        return info
 
-    # SNR calculation
-    if 'Signal Strength' in device_info:
-        signal_strength = device_info['Signal Strength']
-        snr = signal_strength - noise_level
-        device_info['SNR'] = snr
+    # MAC
+    ifcfg = run(["ifconfig", iface], timeout=1.5)
+    mm = re.search(r"ether\s+([0-9a-f\:]{17})", ifcfg, re.I)
+    info["mac"] = mm.group(1) if mm else "-"
+
+    # Try airport first (rich data)
+    airport = mac_airport_path()
+    airport_ok = False
+    if airport:
+        aout = run([airport,"-I"], timeout=2.5)
+        if aout:
+            airport_ok = True
+            def g(key: str) -> Optional[str]:
+                m = re.search(rf"^{key}:\s*(.+)$", aout, re.M)
+                return m.group(1).strip() if m else None
+            info["ssid"]   = g("SSID") or "-"
+            info["bssid"]  = g("BSSID") or "-"
+            rssi           = g("agrCtlRSSI")
+            noise          = g("agrCtlNoise")
+            info["rssi"]   = (rssi + " dBm") if rssi else "-"
+            info["noise"]  = (noise + " dBm") if noise else "-"
+            info["txrate"] = g("lastTxRate") or "-"
+            ch_raw         = g("channel") or "-"
+            chm = re.match(r"(\d+)", ch_raw)
+            ch_num = int(chm.group(1)) if chm else -1
+            info["channel"]= str(ch_num) if ch_num>0 else "-"
+            info["freq"]   = hz_from_channel(ch_num)
+
+            # Auth (varies by OS)
+            info["auth"]   = g("link auth") or g("agrCtlSecurity") or "-"
+
+    # Fallbacks if airport failed or gave blanks
+    # SSID
+    if not info.get("ssid") or info["ssid"] in ("-",""):
+        ss = run(["networksetup","-getairportnetwork", iface], timeout=1.5)
+        # "Current Wi-Fi Network: MySSID"
+        m = re.search(r"Network:\s*(.+)$", ss)
+        if m: info["ssid"] = m.group(1).strip()
+        else: info["ssid"] = "-"
+
+    # BSSID / Channel / Auth via system_profiler (slower but works)
+    if (not info.get("bssid") or info["bssid"] in ("-","")) or \
+       (not info.get("channel") or info["channel"] in ("-","")) or \
+       (not info.get("auth") or info["auth"] in ("-","")):
+        prof = run(["system_profiler","SPAirPortDataType","-detailLevel","mini"], timeout=4.0)
+        # Active data usually under "Current Network Information:"
+        cur = re.search(r"Current Network Information:(.*?)(?:\n\n|\Z)", prof, re.S)
+        block = cur.group(1) if cur else prof
+        if not info.get("bssid") or info["bssid"] in ("-",""):
+            m = re.search(r"BSSID:\s*([0-9a-f:]{17})", block, re.I)
+            if m: info["bssid"] = m.group(1)
+        if not info.get("channel") or info["channel"] in ("-",""):
+            mc = re.search(r"Channel:\s*(\d+)", block)
+            if mc:
+                info["channel"] = mc.group(1)
+                try:
+                    info["freq"] = hz_from_channel(int(mc.group(1)))
+                except Exception:
+                    pass
+        if not info.get("auth") or info["auth"] in ("-",""):
+            ma = re.search(r"Security:\s*(.+)", block)
+            if ma: info["auth"] = ma.group(1).strip()
+
+    # DNS
+    scdns = run(["scutil","--dns"], timeout=2.5)
+    dns = re.findall(r"nameserver\[[0-9]+\]\s*:\s*([0-9a-fA-F\:\.]+)", scdns)
+    info["dns"] = ", ".join(dns[:2]) if dns else "-"
+
+    # DHCP server
+    dh = run(["ipconfig","getpacket", iface], timeout=2.5)
+    dm = re.search(r"server_identifier\s*=\s*([0-9\.]+)", dh)
+    info["dhcp"] = dm.group(1) if dm else "-"
+
+    # If still absolutely nothing useful, return {}
+    if all(info.get(k, "-") in ("-","") for k in ("ssid","bssid","mac")):
+        return {}
+    return info
+
+# -------------------- Linux (same as önceki sürüm) --------------------
+def linux_wifi_iface() -> Optional[str]:
+    iw = which("iw")
+    if iw:
+        out = run([iw,"dev"], timeout=2.0)
+        for b in re.split(r"\n\s*\n", out):
+            if "type managed" in b:
+                m = re.search(r"Interface\s+(\S+)", b)
+                if m: return m.group(1)
+    for g in ("wlan0","wlp2s0","wlp3s0","wlp0s20f3","wlx"):
+        if os.path.exists(f"/sys/class/net/{g}"): return g
+    return None
+
+def linux_wifi_info() -> Dict[str,str]:
+    info: Dict[str,str] = {}
+    iface = linux_wifi_iface()
+    if not iface: return info
+    try:
+        with open(f"/sys/class/net/{iface}/address") as f:
+            info["mac"] = f.read().strip()
+    except Exception:
+        info["mac"] = "-"
+    iw = which("iw")
+    iwgetid = which("iwgetid")
+    if iw:
+        out = run([iw,"dev",iface,"link"], timeout=2.0)
+        m_b = re.search(r"Connected to\s+([0-9a-f\:]{17})", out, re.I)
+        m_s = re.search(r"SSID:\s*(.+)", out)
+        m_f = re.search(r"freq:\s*(\d+)", out)
+        m_ch= re.search(r"channel\s*(\d+)", out)
+        m_sig=re.search(r"signal:\s*(-?\d+)\s*dBm", out)
+        m_br =re.search(r"tx bitrate:\s*([\d\.]+\s*[A-Za-z/]+)", out)
+        info["bssid"] = m_b.group(1) if m_b else "-"
+        info["ssid"]  = m_s.group(1).strip() if m_s else "-"
+        if m_f:
+            f=int(m_f.group(1))
+            info["freq"] = "2.4 GHz" if 2400<=f<=2500 else ("5 GHz" if 4900<=f<=5900 else ("6 GHz" if 5925<=f<=7125 else f"{f} MHz"))
+        else:
+            info["freq"]="-"
+        info["channel"]= m_ch.group(1) if m_ch else "-"
+        info["rssi"]   = (m_sig.group(1)+" dBm") if m_sig else "-"
+        info["noise"]  = "-"
+        info["txrate"] = m_br.group(1) if m_br else "-"
+    if (not info.get("ssid") or info["ssid"]=="-") and iwgetid:
+        ss = run([iwgetid,"-r"], timeout=1.0)
+        if ss: info["ssid"] = ss.strip()
+    dns_list = resolv_conf_dns()
+    info["dns"] = ", ".join(dns_list[:2]) if dns_list else "-"
+    info["dhcp"]= "-"
+    wpa = which("wpa_cli")
+    if wpa:
+        st = run([wpa,"status"], timeout=1.5)
+        m = re.search(r"key_mgmt=([^\n]+)", st)
+        info["auth"] = m.group(1) if m else "-"
     else:
-        device_info['SNR'] = "N/A"
+        info["auth"]="-"
+    return info
 
-    # Collect SSID, AP, frequency, and channel information
-    ssid_cmd = ["iw", "dev", interface, "link"]
+def compute_snr(rssi: str, noise: str) -> str:
     try:
-        ssid_output = subprocess.check_output(ssid_cmd).decode('utf-8')
-        ssid_match = re.search(r'SSID: (.+)', ssid_output)
-        ap_match = re.search(r'Connected to ([0-9a-fA-F:]+)', ssid_output)
-        freq_match = re.search(r'freq: (\d+)', ssid_output)
+        r = float(str(rssi).replace(" dBm","").strip())
+        n = float(str(noise).replace(" dBm","").strip())
+        return f"{int(r-n)} dB"
+    except Exception:
+        return "-"
 
-        if ssid_match:
-            device_info['SSID'] = ssid_match.group(1)
-        else:
-            device_info['SSID'] = "N/A"
+def rate_pretty(rate: str) -> str:
+    if not rate or rate == "-": return "-"
+    m = re.search(r"([\d\.]+)\s*([A-Za-z/]+)", rate)
+    if not m: return rate
+    v = float(m.group(1)); u = m.group(2).lower()
+    if "gbps" in u or "gbit" in u: return f"{v*1000:.0f} Mbps"
+    if "mbps" in u or "mbit" in u: return f"{v:.0f} Mbps"
+    if "kbit" in u or "kbps" in u: return f"{v/1000:.1f} Mbps"
+    return f"{v} {m.group(2)}"
 
-        if ap_match:
-            device_info['AP'] = ap_match.group(1)
-        else:
-            device_info['AP'] = "N/A"
+def classify_perf(signal: str, snr: str, gtw_ms: Optional[float], int_ms: Optional[float]) -> str:
+    score = 0
+    try:
+        sig = float(signal.replace(" dBm","").strip())
+        score += 3 if sig>=-55 else 2 if sig>=-65 else 1 if sig>=-75 else 0
+    except Exception: pass
+    try:
+        s = int(snr.replace(" dB","").strip())
+        score += 3 if s>=30 else 2 if s>=20 else 1 if s>=10 else 0
+    except Exception: pass
+    if gtw_ms is not None:
+        score += 3 if gtw_ms<=3 else 2 if gtw_ms<=8 else 1 if gtw_ms<=20 else 0
+    if int_ms is not None:
+        score += 3 if int_ms<=10 else 2 if int_ms<=25 else 1 if int_ms<=60 else 0
+    return "Excellent" if score>=9 else "Good" if score>=6 else "Fair" if score>=3 else "Poor"
 
-        if freq_match:
-            freq_value = freq_match.group(1)
-            device_info['Frequency'] = f"{freq_value} MHz"
-            device_info['Channel'] = get_channel_from_frequency(freq_value)
-        else:
-            device_info['Frequency'] = "N/A"
-            device_info['Channel'] = "N/A"
-    except subprocess.CalledProcessError:
-        device_info['SSID'] = "N/A"
-        device_info['AP'] = "N/A"
-        device_info['Frequency'] = "N/A"
-        device_info['Channel'] = "N/A"
-
-    if device_info:
-        device_info['Timestamp'] = timestamp  # Add timestamp
-        devices_info.append(device_info)
-
-    return devices_info
-
-# Function to display real-time Wi-Fi info in a table format
-def display_wifi_info():
+def display_header():
     print("Real-Time Wi-Fi Analysis Started (Press CTRL+C to stop)")
+    widths = [19,17,12,18,10,7,16,12,14,6,8,8,6,8,6,16]
+    cols = ["{:<19}"] + ["{:>"+str(w)+"}" for w in widths[1:]]
+    print(" ".join(fmt.format(h) for fmt,h in zip(cols,HEADERS)))
 
-    headers = [
-        'Timestamp', 'MAC Address', 'SSID', 'AP', 'Frequency', 'Channel',
-        'Signal Strength', 'Data Rate', 'Throughput',
-        'SNR', 'GTW Ping', 'INT Ping', 'DHCP', 'DNS', 'Auth', 'WIFI Performance'
-    ]
+def render_row(fields: List[str]):
+    widths = [19,17,12,18,10,7,16,12,14,6,8,8,6,8,6,16]
+    out = []
+    for i,(v,w) in enumerate(zip(fields,widths)):
+        v = v if v not in (None,"") else "-"
+        v = (v[:w-1]+"…") if len(v)>w else v
+        out.append(("{:<"+str(w)+"}" if i==0 else "{:>"+str(w)+"}").format(v))
+    print(" ".join(out))
 
-    # Print column headers
-    header_format = "{:<20} {:<18} {:<8} {:<18} {:<12} {:<8} {:<15} {:<20} {:<25} {:<10} {:<10} {:<10} {:<7} {:<7} {:<7} {:<10}"
-    print(header_format.format(*headers))
+def not_connected_row() -> List[str]:
+    return [ts()] + ["-"]*(len(HEADERS)-1)
 
-    try:
-        while True:
-            wifi_data = get_wifi_info()
+def main_loop():
+    display_header()
+    while True:
+        try:
+            if IS_MAC:
+                wi = mac_wifi_info()
+            elif IS_LINUX:
+                wi = linux_wifi_info()
+            else:
+                wi = {}
 
-            # Print data for each device
-            for device in wifi_data:
-                # Default performance status
-                wifi_performance = "good"
-                wifi_color = GREEN
+            if not wi or wi.get("ssid","-") in ("-",""):
+                render_row(not_connected_row())
+                time.sleep(REFRESH_SEC); continue
 
-                # Signal Strength check
-                if device.get('Signal Strength', 'N/A') != "N/A":
-                    signal_strength = device['Signal Strength']
-                    if signal_strength >= -70:
-                        wifi_performance = "poor"
-                        wifi_color = ORANGE
-                else:
-                    # Connection loss
-                    device['Signal Strength'] = 0
-                    device['Data Rate'] = 0
-                    device['Throughput'] = 0
-                    device['SNR'] = 0
-                    wifi_performance = "Failure (connection lost)"
-                    wifi_color = RED
+            mac = wi.get("mac","-")
+            ssid= wi.get("ssid","-")
+            bssid=wi.get("bssid","-")
+            freq= wi.get("freq","-")
+            chan= wi.get("channel","-")
+            rssi= wi.get("rssi","-")
+            noise=wi.get("noise","-")
+            tx  = rate_pretty(wi.get("txrate","-"))
+            auth= wi.get("auth","-")
 
-                # SNR check
-                if device.get('SNR', 'N/A') != "N/A":
-                    snr = device['SNR']
-                    if snr >= 30:
-                        wifi_performance = "poor"
-                        wifi_color = ORANGE
-                else:
-                    wifi_performance = "Failure"
-                    wifi_color = RED
+            snr = compute_snr(rssi, noise) if rssi!="-" and noise!="-" else "-"
 
-                # Gateway ping check
-                gateway_status, gateway_ping_time = gateway_check()
-                if gateway_status:
-                    gateway_ping_time_text = f"{gateway_ping_time:.2f} ms"
-                    if gateway_ping_time > 12.00:
-                        wifi_performance = "poor"
-                        wifi_color = ORANGE
-                else:
-                    gateway_ping_time_text = "Failure"
-                    wifi_performance = "Failure"
-                    wifi_color = RED
+            gw = get_default_gateway()
+            gms = do_ping(gw)
+            ims = do_ping(INTERNAL_PING_HOST)
+            gstr = f"{gms:.3f} ms" if gms is not None else "-"
+            istr = f"{ims:.3f} ms" if ims is not None else "-"
 
-                # Internet ping check
-                internet_status, internet_ping_time = internet_check()
-                if internet_status:
-                    internet_ping_time_text = f"{internet_ping_time:.2f} ms"
-                    if internet_ping_time > 50.00:
-                        wifi_performance = "poor"
-                        wifi_color = ORANGE
-                else:
-                    internet_ping_time_text = "Failure"
-                    wifi_performance = "Failure"
-                    wifi_color = RED
+            dns = wi.get("dns","-")
+            dhcp= wi.get("dhcp","-")
+            thr = "-"
 
-                # DHCP test
-                if dhcp_check():
-                    dhcp_status = "Success"
-                else:
-                    dhcp_status = "Failure"
-                    wifi_color = RED
+            perf = classify_perf(rssi, snr, gms, ims)
 
-                # DNS test
-                if dns_check():
-                    dns_status = "Success"
-                else:
-                    dns_status = "Failure"
-                    wifi_color = RED
+            row = [ts(), mac, ssid, bssid, freq, str(chan) if chan else "-",
+                   rssi, tx, thr, snr, gstr, istr, dhcp, dns, auth, perf]
+            render_row(row)
+            time.sleep(REFRESH_SEC)
+        except KeyboardInterrupt:
+            print("\nStopped."); break
+        except Exception as e:
+            sys.stderr.write(f"\n[WARN] {e}\n"); time.sleep(REFRESH_SEC)
 
-                # Authentication test
-                auth_status = auth_check()  # Get the used authentication method
-                auth_results.append(auth_status)
-
-                # Record the data
-                timestamps.append(device.get('Timestamp', 'N/A'))
-                signal_strengths.append(float(device.get('Signal Strength', 'N/A')))
-                snr_values.append(float(device.get('SNR', 'N/A')))
-
-                # 'Data Rate' check and append
-                data_rate = device.get('Data Rate', 'N/A')
-                if isinstance(data_rate, str):
-                    data_rates.append(float(data_rate.replace(" MBit/s", "")))
-                else:
-                    data_rates.append(float(data_rate))  # If data is directly int
-
-                # 'Throughput' check and append
-                throughput = device.get('Throughput', 'N/A')
-                if isinstance(throughput, str):
-                    throughput_value = float(throughput.replace(" Mbps", ""))
-                else:
-                    throughput_value = throughput  # If data is directly int
-
-                # Format the throughput to show only 2 decimal places and append "Mbps"
-                formatted_throughput = f"{throughput_value:.2f} Mbps"
-                throughputs.append(throughput_value)
-
-                # Change 'Failure' to 0
-                if gateway_ping_time_text != "Failure":
-                    gtw_ping_times.append(float(gateway_ping_time_text.replace(" ms", "")))
-                else:
-                    gtw_ping_times.append(0)  # Replace 'Failure' with 0
-
-                if internet_ping_time_text != "Failure":
-                    int_ping_times.append(float(internet_ping_time_text.replace(" ms", "")))
-                else:
-                    int_ping_times.append(0)  # Replace 'Failure' with 0
-
-                # DHCP, DNS, and Auth results
-                dhcp_results.append(dhcp_status)
-                dns_results.append(dns_status)
-                auth_results.append(auth_status)
-
-                wifi_performance_results.append(wifi_performance)
-
-                row_format = "{:<20} {:<18} {:<8} {:<18} {:<12} {:<8} {:<15} {:<20} {:<25} {:<10} {:<10} {:<10} {:<7} {:<7} {:<7} {:<10}"
-                print(row_format.format(
-                    device.get('Timestamp', 'N/A'), device.get('MAC Address', 'N/A'), device.get('SSID', 'N/A'),
-                    device.get('AP', 'N/A'), device.get('Frequency', 'N/A'), device.get('Channel', 'N/A'),
-                    device.get('Signal Strength', 'N/A'), device.get('Data Rate', 'N/A'),
-                    formatted_throughput, device.get('SNR', 'N/A'),
-                    gateway_ping_time_text, internet_ping_time_text, dhcp_status, dns_status, auth_status, f"{wifi_color}{wifi_performance}{RESET}"
-                ))
-
-            time.sleep(5)
-
-    except KeyboardInterrupt:
-        print("\nAnalysis stopped.")
-        generate_summary_report()
-
-# Function to generate the summary report
-def generate_summary_report():
-    if timestamps:
-        duration = len(timestamps) * 5  # Total test duration (5 seconds per test)
-        successful_tests = wifi_performance_results.count("good")
-        poor_tests = wifi_performance_results.count("poor")
-        failed_tests = wifi_performance_results.count("Failure")
-
-        # Summary report
-        print("\nTest Summary:")
-        print(f"Total Test Duration: {duration} seconds")
-        print(f"Average Signal Strength: {statistics.mean(signal_strengths):.2f} dB")
-        print(f"Average SNR: {statistics.mean(snr_values):.2f} dB")
-        print(f"Average Data Rate: {statistics.mean(data_rates):.2f} MBit/s")
-        print(f"Average Throughput: {statistics.mean(throughputs):.2f} Mbps")
-        print(f"Average Gateway Ping: {statistics.mean(gtw_ping_times):.2f} ms")
-        print(f"Average Internet Ping: {statistics.mean(int_ping_times):.2f} ms")
-        print(f"DHCP Status: {dhcp_results[-1]}")
-        print(f"DNS Status: {dns_results[-1]}")
-        print(f"Authentication Method: {auth_results[-1]}")
-        print(f"Successful Tests: {successful_tests}")
-        print(f"Poor Tests: {poor_tests}")
-        print(f"Failed Tests: {failed_tests}")
-
-        # Created by message
-        print("\nCreated by Oxoo Networks LLC.")
-
-        # Create graph
-        plt.figure(figsize=(10, 5))
-
-        # Only show the start and end times on the time axis
-        time_labels = [timestamps[0], timestamps[-1]]
-
-        plt.plot(signal_strengths, label="Signal Strength (dB)", color="blue")
-        plt.plot(snr_values, label="SNR (dB)", color="green")
-        plt.plot(gtw_ping_times, label="Gateway Ping (ms)", color="orange")
-        plt.plot(int_ping_times, label="Internet Ping (ms)", color="red")
-
-        plt.title(f"Wi-Fi Performance Over Time\nCreated by Oxoo Networks LLC.")
-        plt.xlabel("Test Time")
-        plt.xticks([0, len(timestamps)-1], time_labels)  # Start and end times for x-axis
-        plt.ylabel("Values")
-        plt.legend()
-        plt.grid(True)
-
-        # Move the summary report to the bottom right corner of the graph
-        summary_text = (
-            f"Test Duration: {duration} s\n"
-            f"Avg Signal Strength: {statistics.mean(signal_strengths):.2f} dB\n"
-            f"Avg SNR: {statistics.mean(snr_values):.2f} dB\n"
-            f"Avg Data Rate: {statistics.mean(data_rates):.2f} MBit/s\n"
-            f"Avg Throughput: {statistics.mean(throughputs):.2f} Mbps\n"
-            f"Avg Gateway Ping: {statistics.mean(gtw_ping_times):.2f} ms\n"
-            f"Avg Internet Ping: {statistics.mean(int_ping_times):.2f} ms\n"
-            f"DHCP: {dhcp_results[-1]}\n"
-            f"DNS: {dns_results[-1]}\n"
-            f"Auth: {auth_results[-1]}\n"
-            f"Successful Tests: {successful_tests}\n"
-            f"Poor Tests: {poor_tests}\n"
-            f"Failed Tests: {failed_tests}"
-        )
-        plt.figtext(0.99, 0.05, summary_text, fontsize=10, verticalalignment='bottom', bbox=dict(facecolor='white', alpha=0.5), ha='right')
-
-        # Check and create the folder if it doesn't exist
-        if not os.path.exists('report'):
-            os.makedirs('report')
-
-        # Create file name with date and time
-        file_name = datetime.now().strftime('report/report_%Y%m%d_%H%M%S.png')
-
-        # Save the graph
-        plt.savefig(file_name)
-
-        # Show the graph
-        plt.show()
-
-        # Generate PDF
-        generate_pdf_report(summary_text, file_name)
-
-def generate_pdf_report(summary_text, graph_image):
-    pdf_file_name = datetime.now().strftime('report/report_%Y%m%d_%H%M%S.pdf')
-    c = canvas.Canvas(pdf_file_name, pagesize=letter)
-    c.drawString(100, 750, "Wi-Fi Performance Report")
-    c.drawString(100, 735, "Created by Oxoo Networks LLC")
-    text = c.beginText(100, 700)
-    text.textLines(summary_text)
-    c.drawText(text)
-    c.drawImage(graph_image, 100, 300, width=400, height=200)
-    c.save()
-
-# Start the program
-display_wifi_info()
+if __name__ == "__main__":
+    if not (IS_MAC or IS_LINUX):
+        print("This script currently supports macOS and Linux."); sys.exit(1)
+    main_loop()
