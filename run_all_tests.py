@@ -10,9 +10,8 @@ import shutil
 from datetime import datetime
 
 # === AYARLAR ===
-RUN_DURATION = 30  # saniye
+RUN_DURATION = 30  # saniye: her test modülünü kaç saniye çalıştıracağımız
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-BATCH_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 
 TESTS = [
@@ -25,13 +24,14 @@ TESTS = [
     "wificheck.py",
 ]
 
-RESULT_FILE = os.path.join(RESULTS_DIR, f"{BATCH_TS}_all_tests.txt")
-
 REMOVE_DIRS = [
     "http_latency_test_result",
     "meeting_test",
 ]
 
+# ------------------------------------------------------
+# Yardımcılar
+# ------------------------------------------------------
 def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
 
@@ -146,10 +146,10 @@ def _is_wireless_iface(iface):
         return False
 
 def is_wifi_active():
-    """Return True if the primary route egress interface appears to be Wi‑Fi."""
+    """Return True if the primary route egress interface appears to be Wi-Fi."""
     iface = _get_primary_iface()
     if not iface:
-        # No info → default to not Wi‑Fi (skip wificheck)
+        # No info → default to not Wi-Fi (skip wificheck)
         return False
     return _is_wireless_iface(iface)
 
@@ -215,29 +215,35 @@ def parse_metrics_from_text(base, text):
 
     return metrics
 
-# === Ana ===
-def main():
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    print(f"Toplam {len(TESTS)} test başlatılıyor... (her biri {RUN_DURATION} sn)")
+# ------------------------------------------------------
+# Tek bir tur tüm testleri çalıştır ve zaman damgalı dosyaya yaz
+# ------------------------------------------------------
+def run_once():
+    ensure_dir(RESULTS_DIR)
+    batch_ts = datetime.now().strftime("%Y%m%d_%H%M%S")  # her tur için yeni damga
+    result_file = os.path.join(RESULTS_DIR, f"{batch_ts}_all_tests.txt")
 
-    head = f"# Oprobe Combined Test Results\nGenerated at {datetime.now().isoformat(timespec='seconds')}\n" \
-           + "=" * 70 + "\n\n"
+    print(f"SUM {len(TESTS)} tests running... (each tests {RUN_DURATION} sn)")
+    head = (
+        f"# Oprobe Combined Test Results\n"
+        f"Generated at {datetime.now().isoformat(timespec='seconds')}\n"
+        + "=" * 70 + "\n\n"
+    )
 
     blocks = []
-
     for test in TESTS:
         script_path = os.path.join(BASE_DIR, test)
-        print(f"Çalıştırılıyor: {test} ...")
+        print(f"Running: {test} ...")
 
         if test == "wificheck.py" and not is_wifi_active():
-            # Skip Wi‑Fi test on BaseT and log a clear block
+            # Skip Wi-Fi test on BaseT and log a clear block
             start_ts = datetime.now().isoformat(timespec='seconds')
             block_text = (
                 "### wificheck.py ###\n"
                 f"Started: {start_ts}\n"
                 "STATUS: SKIPPED\n"
                 "REASON: This agent connection BaseT\n"
-                + "="*70 + "\n"
+                + "="*70 + "\n\n"
             )
         else:
             block_text = run_single_test(script_path, RUN_DURATION)
@@ -245,11 +251,26 @@ def main():
         blocks.append(block_text)
         cleanup_dirs()
 
-    with open(RESULT_FILE, "w", encoding="utf-8") as f:
+    with open(result_file, "w", encoding="utf-8") as f:
         f.write(head)
         f.write("\n".join(blocks))
 
-    print(f"Bitti. Tek dosya: {RESULT_FILE}")
+    print(f"✅ Bitti. Tek dosya: {result_file}")
 
+# ------------------------------------------------------
+# Periyodik çalıştırma döngüsü
+# ------------------------------------------------------
 if __name__ == "__main__":
-    main()
+    INTERVAL_SECONDS = 10 * 60  # 10 dakika
+
+    try:
+        # İlk tur hemen
+        run_once()
+
+        # Sonra periyodik
+        while True:
+            print(f"⏳ Bir sonraki tur için bekleniyor: {INTERVAL_SECONDS} saniye (CTRL+C ile durdurabilirsiniz)")
+            time.sleep(INTERVAL_SECONDS)
+            run_once()
+    except KeyboardInterrupt:
+        print("\n❌ Program manuel olarak durduruldu (CTRL+C).")
